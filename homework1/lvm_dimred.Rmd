@@ -282,6 +282,7 @@ dev.off
 > and ggplot2 to plot them altogether. Do not send 5 figures!
 
 ```{r}
+library(ggpubr)
 
 create_violin_plot <- function(V) {
   ggplot(loadings) + geom_violin(aes(x=as.factor(strain), y=.data[[V]]), draw_quantiles=c(0.25, 0.5, 0.75)) + labs(x="Strain")
