@@ -201,7 +201,7 @@ top2
 
 ```
 
-Here is my assigning cell type identity to clusters. It's 100% does not reflect reality because the clusters found are poorly defined. But if we compare labeled t-SNE plot and six t-SNE projections of expression markers, we can see that NK cells and T cells are mapped pretty well.
+Here is my assinment of cell type identity to clusters. It's 100% does not reflect reality because the clusters found are poorly defined. But if we compare labeled t-SNE plot and six t-SNE projections of expression markers, we can see that NK cells and T cells are mapped pretty well.
 
 | Cluster ID | Markers           | Cell Type                    |
 |------------|-------------------|------------------------------|
