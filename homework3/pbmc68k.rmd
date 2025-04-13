@@ -1,0 +1,290 @@
+---
+title: "pbmc68k.rmd"
+output:
+  html_document: default
+  pdf_document: default
+date: "2025-04-11"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Downloading data 68k PBMC
+
+This notebook provides analysis pipeline to the dataset published in Zheng et al. 2017, called 'Fresh 68k PBMCs (Donor A)'.
+
+Download the following data on 10X Genomics <https://support.10xgenomics.com/single-cell-gene-expression/datasets>.
+
+The goal of Zheng et al. analysis was to profile 68k fresh peripheral blood mononuclear cells (PBMCs) from a healthy donor and demonstrated the scRNA-seq platform’s ability to dissect large immune populations.
+
+```{r init}
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(ggplot2) 
+
+# Load the PBMC 68k dataset
+pbmc.data <- Read10X(data.dir = "fresh_68k_pbmc_donor_a_filtered_gene_bc_matrices/filtered_matrices_mex/hg19/")
+
+# Initialize the Seurat object with the raw (non-normalized data)
+pbmc <- CreateSeuratObject(counts = pbmc.data, project = "pbmc68k", min.cells = 3, min.features = 200)
+pbmc
+```
+
+## Preprocessing data
+
+```{r mito, fig.height=7, fig.width=13}
+pbmc[["percent.mt"]] <- PercentageFeatureSet(pbmc, pattern = "^MT-")
+```
+
+```{r qc, fig.height=7, fig.width=13}
+
+# Visualize QC metrics as a violin plot
+VlnPlot(pbmc, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+# FeatureScatter is typically used to visualize feature-feature relationships, but can be used for anything calculated by the object, i.e. columns in object metadata, PC scores etc.
+
+plot1 <- FeatureScatter(pbmc, feature1 = "nCount_RNA", feature2 = "percent.mt") 
+plot2 <- FeatureScatter(pbmc, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") 
+plot1 + plot2
+
+pbmc <- subset(pbmc, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 5)
+
+# Visualize distribution of number of genes and UMI counts detected per 68k PBMCs after filtering
+vplot <- VlnPlot(pbmc, features = c("nFeature_RNA", "nCount_RNA"), pt.size = 0, ncol = 2 , combine = FALSE, cols = c("#FFD1DC", "#FFD1DC"))
+
+vplot[[1]] <- vplot[[1]] +  xlab("Genes/Cell") + ylab("Counts") + ggtitle(NULL) + 
+  theme(
+    axis.title.y = element_blank(),
+    legend.position = "none",
+    plot.title = element_blank()
+  )
+
+vplot[[2]] <- vplot[[2]] + xlab("UMIs Counts/Cell") + ggtitle(NULL) + 
+  theme(
+    axis.title.y = element_blank(),
+    legend.position = "none",
+    plot.title = element_blank()
+  )
+
+
+vln_plot <- wrap_plots(vplot, ncol = 2) + plot_annotation(theme = theme(plot.margin = margin(10, 10, 10, 10)))
+
+vln_plot # save it to final figure
+```
+
+```{r normalize.default, eval = FALSE}
+pbmc <- NormalizeData(pbmc)
+```
+
+# Identification of highly variable features (feature selection)
+
+```{r hvf, fig.height=5, fig.width=11}
+pbmc <- FindVariableFeatures(pbmc, selection.method = 'vst', nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(pbmc), 10)
+
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(pbmc)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot2
+```
+
+## Scaling the data
+
+```{r regress, fig.height=7, fig.width=11, results='hide'}
+pbmc <- ScaleData(pbmc, features = VariableFeatures(pbmc))
+```
+
+## Perform linear dimensional reduction
+
+```{r pca,results='hide'}
+top_var_genes <- head(VariableFeatures(pbmc), 1000)
+pbmc <- RunPCA(pbmc, features = top_var_genes)
+```
+
+```{r pca_viz, message=TRUE}
+print(pbmc[['pca']], dims = 1:5, nfeatures = 5)
+VizDimLoadings(pbmc, dims = 1:2, reduction = 'pca')
+DimPlot(pbmc, reduction = 'pca')
+```
+
+## Determine the 'dimensionality' of the dataset
+
+```{r}
+ElbowPlot(pbmc, ndims = 30)
+```
+
+## Run non-linear dimensional reduction tSNE
+
+```{r tsne, fig.height=5, fig.width=7}
+pbmc <- RunTSNE(pbmc, dims = 1:10)
+
+DimPlot(pbmc, reduction = 'tsne', label = TRUE, pt.size = 0.5)
+```
+
+```{r tsneplot_1, fig.height=5, fig.width=7}
+tsne_coords <- Embeddings(pbmc, "tsne")
+km.res <- kmeans(tsne_coords, centers = 10)
+pbmc@meta.data$kmeans_clusters <- as.factor(km.res$cluster)  
+
+# Calculate cluster percentages
+cluster_percents <- prop.table(table(pbmc$kmeans_clusters)) * 100
+percent_labels <- paste0(names(cluster_percents), " (", round(cluster_percents, 1), "%)")
+cluster_labels <- setNames(percent_labels, names(cluster_percents))
+
+# Plot with percentage labels
+tsne_plot <- DimPlot(pbmc, 
+                    reduction = "tsne", 
+                    group.by = "kmeans_clusters",
+                    label = TRUE,
+                    pt.size = 0.5) +
+  scale_color_discrete(labels = percent_labels) +
+  theme(legend.position = "right",
+        legend.title = element_blank(),
+        plot.title = element_blank()) +
+  guides(color = guide_legend(override.aes = list(size = 3)))
+
+tsne_plot
+
+```
+
+## Finding differentially expressed features (cluster biomarkers)
+
+```{r top2, fig.height=5, fig.width=7}
+# Find top 2 markers for every cluster compared to all remaining cells, report only the positive ones
+Idents(pbmc) <- "kmeans_clusters"
+pbmc.markers <- FindAllMarkers(pbmc, only.pos = TRUE, min.pct = 0.25,  logfc.threshold = 0.25)
+top2 <- pbmc.markers %>% group_by(cluster) %>% top_n(n = 2, wt = avg_log2FC)
+```
+
+```{r heatmap, fig.height=5, fig.width=7}
+# Generate heatmap of top 2 markers per cluster
+heatmap <- DoHeatmap(pbmc,
+                     features = top2$gene,
+                     group.by = "kmeans_clusters") +
+  scale_fill_gradient2(low = "slategray2", mid = "slateblue1", high = "slateblue4", midpoint = 0) + theme(legend.title = element_blank()) +
+  guides(color = guide_legend(FALSE))
+
+heatmap
+```
+
+## Reproducing Figure 3
+
+Reproducing Figure 3 from publication <https://www.nature.com/articles/ncomms14049/figures/3>.
+
+Figure contains:
+
+1.  Distribution of number of genes (and UMI counts detected per 68k PBMCs (vln_plot object).
+2.  tSNE projection of 68k PBMCs, where each cell is grouped into one of the 10 clusters (distinguished by their colours) (tsne_plot object).
+3.  Normalized expression (centred) of the top variable genes (rows) from each of 10 clusters (columns) is shown in a heatmap (heatmap object).
+4.  tSNE projection of 68k PBMCs, with each cell coloured based on their normalized expression of *CD3D*, *CD8A*, *NKG7*, *FCER1A*, *CD16* and *S100A8* (are generated below).
+
+```{r exp_proj, fig.height=5, fig.width=7}
+# Generate tSNE projection of 68k PBMCs, with each cell coloured based on their normalized expression of CD3D, CD8A, NKG7, FCER1A, CD16 and S100A8. 
+
+d <- FeaturePlot(pbmc, features = "CD3D", cols = c("lightblue", "lightpink")) + ggtitle("CD3D")
+e <- FeaturePlot(pbmc, features = "CD8A", cols = c("lightblue", "lightpink")) + ggtitle("CD8A")
+f <- FeaturePlot(pbmc, features = "NKG7", cols = c("lightblue", "lightpink")) + ggtitle("NKG7")
+g <- FeaturePlot(pbmc, features = "FCER1A", cols = c("lightblue", "lightpink")) + ggtitle("FCER1A")
+h <- FeaturePlot(pbmc, features = "FCGR3A", cols = c("lightblue", "lightpink")) + ggtitle("CD16 / FCGR3A")
+i <- FeaturePlot(pbmc, features = "S100A8", cols = c("lightblue", "lightpink")) + ggtitle("S100A8")
+
+exp_projection <- d + e + f + g+ h + i + plot_layout(ncol=3)
+exp_projection
+```
+
+```{r}
+top2
+
+```
+
+Here is my assigning cell type identity to clusters. It's 100% does not reflect reality because the clusters found are poorly defined. But if we compare labeled t-SNE plot and six t-SNE projections of expression markers, we can see that NK cells and T cells are mapped pretty well.
+
+| Cluster ID | Markers           | Cell Type                    |
+|------------|-------------------|------------------------------|
+| 1          | ANXA2, AQP3       | Epithelial cells             |
+| 2          | MAL, CORO1B       | T cells                      |
+| 3          | CCR7, LEF1        | Naive T cells                |
+| 4          | CD8B, RP11-291B2  | CD8+ T cells                 |
+| 5          | FOS, IL7R         | Memory T cells               |
+| 6          | GZMK, DUSP2       | Effector memory CD8+ T cells |
+| 7          | RP11-290F2, MS4A7 | Monocytes/Macrophages        |
+| 8          | FGFBP2, GZMH      | Activated NK cells           |
+| 9          | MS4A1, TCL1A      | B cells                      |
+| 10         | S100A8, LGALS2    | Neutrophils                  |
+
+```{r}
+celltype_mapping <- c(
+  "1" = "Epithelial",
+  "2" = "T cells",
+  "3" = "Naive T",
+  "4" = "CD8+ T",
+  "5" = "Memory T",
+  "6" = "Effector CD8+",
+  "7" = "Monocytes/Macrophages",
+  "8" = "Activated NK",
+  "9" = "B cells",
+  "10" = "Neutrophils"
+)
+
+pbmc@meta.data$cell_type <- celltype_mapping[as.character(pbmc@meta.data$kmeans_clusters)]
+
+tsne_labeled <- DimPlot(pbmc,
+                       reduction = "tsne",
+                       group.by = "cell_type",
+                       label = TRUE,
+                       pt.size = 0.5,
+                       repel = TRUE) +
+  theme(legend.position = "right",
+        plot.title = element_text(hjust = 0.5, face = "bold"))
+
+results_table <- data.frame(
+  Cluster = names(celltype_mapping),
+  CellType = celltype_mapping,
+  Markers = c(
+    "ANXA2, AQP3",
+    "MAL, CORO1B",
+    "CCR7, LEF1",
+    "CD8B, RP11-291B2",
+    "FOS, IL7R",
+    "GZMK, DUSP2",
+    "RP11-290F2, MS4A7",
+    "FGFBP2, GZMH",
+    "MS4A1, TCL1A",
+    "S100A8, LGALS2"
+  )
+)
+
+tsne_labeled
+```
+
+```{r}
+vln_plot <- vln_plot + 
+  theme(
+    aspect.ratio = 2, 
+    plot.margin = margin(5, 5, 5, 5, "mm")
+  ) 
+
+tsne_plot <- tsne_plot + theme(aspect.ratio = 1)
+tsne_labeled <- tsne_labeled + theme(aspect.ratio = 1)
+
+exp_projection <- exp_projection + theme(aspect.ratio = 0.2)
+
+combined_plot <- wrap_plots(vln_plot, tsne_plot, tsne_labeled, heatmap, exp_projection,
+  nrow = 2,
+  widths = c(1, 1, 1),
+  heights = c(1, 0.8)
+)
+
+ggsave(
+  "figure3.png",
+  combined_plot,
+  width = 25,
+  height = 14,
+  units = "in",
+  dpi = 300
+)
+```
