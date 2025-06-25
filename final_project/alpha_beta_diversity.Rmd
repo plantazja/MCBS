@@ -1,0 +1,372 @@
+---
+title: "alpha_beta_diversity"
+output: html_document
+date: "2025-06-25"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## CuratedMetagenomics Data Extraction
+
+```{r, echo=FALSE, results='hide', message=FALSE}
+# List of required packages
+packages <- c(
+  "curatedMetagenomicData", "dplyr", "stringr", "scater", "snakecase", "forcats", 
+  "gtsummary", "mia", "ggplot2", "ggsignif", "hrbrthemes", "vegan", "uwot", 
+  "ANCOMBC", "tibble", "tidyr", "knitr", "ggrepel", "phyloseq", "microbiome"
+)
+
+# Install missing packages
+installed_packages <- rownames(installed.packages())
+missing_packages <- setdiff(packages, installed_packages)
+
+if (length(missing_packages) > 0) {
+  BiocManager::install(missing_packages, ask = FALSE)
+}
+
+# Load all packages
+lapply(packages, library, character.only = TRUE)
+
+library(curatedMetagenomicData)
+library(dplyr)
+library(stringr)
+library(scater)
+library(snakecase)
+library(forcats)
+library(gtsummary)
+library(mia)
+library(ggplot2)
+library(ggsignif)
+library(hrbrthemes)
+library(vegan)
+library(uwot)
+library(ANCOMBC)
+library(tibble)
+library(tidyr)
+library(knitr)
+library(ggrepel)
+library(phyloseq)
+```
+
+```{r}
+# Dataframe with all samples
+skinMetadata_all <- sampleMetadata |>
+  filter(body_site == "skin") |>
+  filter(study_name != "OlmMR_2017") # filter out study with premature_born samples
+
+# Dataframe with psoriasis and healthy samples from diffrent studies cohorts
+skinMetadata_PS <- sampleMetadata |>
+  filter(body_site == "skin") |>
+  filter(disease == "healthy" | disease == "arthritis;psoriasis" | disease == "psoriasis")
+
+# Dataframe with AD and healthy samples from one study cohort  
+skinMetadata_AD <- sampleMetadata |>
+  filter(body_site == "skin") |>
+  filter(study_name == "ChngKR_2016")
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE}
+# Rename rare diseases like AR and AR;asthma and convert all AD with comorbidities (AR, asthma, or both) to simple "AD"
+skinMetadata_AD <- skinMetadata_AD %>%
+  mutate(
+    disease_condition = case_when(
+      str_detect(disease, "AD") ~ "AD",
+      disease == "AR" ~ NA_character_,
+      disease == "AR;asthma" ~ NA_character_,  
+      disease == "healthy" ~ "healthy",
+      TRUE ~ disease
+    )
+  ) %>%
+  filter(!is.na(disease_condition)) 
+
+skinMetadata_AD$disease[skinMetadata_AD$disease == 'AD;AR'] <- "AD"
+skinMetadata_AD$disease[skinMetadata_AD$disease == 'AD;asthma'] <- "AD"
+skinMetadata_AD$disease[skinMetadata_AD$disease == 'AD;AR;asthma'] <- "AD"
+
+# Use the returnSamples() function to return the taxanomic abundance datframe
+skinData_AD <-
+  filter(skinMetadata_AD) |>
+  select(where(~ !all(is.na(.x)))) |>
+  returnSamples("relative_abundance", counts = TRUE)
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE}
+# Convert arthritis;psoriasis to simple "psoriasis"
+skinMetadata_PS$disease[skinMetadata_PS$disease == 'arthritis;psoriasis'] <- "psoriasis"
+
+# Use the returnSamples() function to return the taxanomic abundance datframe
+skinData_PS <-
+  filter(skinMetadata_PS) |>
+  select(where(~ !all(is.na(.x)))) |>
+  returnSamples("relative_abundance", counts = TRUE)
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE}
+# Assign assay name "counts" to the main assay in the SingleCellExperiment object
+assayNames(skinData_AD) <-
+  "counts"
+
+# Perform log-normalization of the counts data
+skinData_AD <-
+  logNormCounts(skinData_AD)
+
+# Subset the SingleCellExperiment object to match samples in metadata
+skinData_AD <- skinData_AD[, skinMetadata_AD$sample_id]
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE}
+# Assign assay name "counts" to the main assay in the SingleCellExperiment object
+assayNames(skinData_PS) <-
+  "counts"
+
+# Perform log-normalization of the counts data
+skinData_PS <-
+  logNormCounts(skinData_PS)
+
+# Subset the SingleCellExperiment object to match samples in metadata
+skinData_PS <- skinData_PS[, skinMetadata_PS$sample_id]
+```
+
+## Alpha Diversity
+
+```{r}
+# Estimating Alpha Diversity for AD and healthy samples
+skinData_AD |>
+  estimateDiversity(abund_values = "logcounts", index = "shannon") |>
+  plotColData(x = "disease", y = "shannon", colour_by = "disease", shape_by = "disease") +
+  geom_signif(comparisons = list(c("healty", "AD")), test = "t.test", map_signif_level = TRUE) +
+  labs(
+    title = "Alpha Diversity by Health Condition, Shannon Index (H')",
+    subtitle = "Skin  Microbiome Samples",
+    x = "Health condition",
+    y = "Alpha Diversity (H')"
+  ) +
+  guides(color = guide_none(), shape = guide_none()) +
+  theme_ipsum_rc()
+```
+
+```{r}
+# Estimating Alpha Diversity for psoriasis and healthy samples
+skinData_PS |>
+  estimateDiversity(abund_values = "logcounts", index = "shannon") |>
+  plotColData(x = "disease", y = "shannon", colour_by = "disease", shape_by = "disease") +
+  geom_signif(comparisons = list(c("healthy", "psoriasis")), test = "t.test", map_signif_level = TRUE) +
+  labs(
+    title = "Alpha Diversity by Health Condition, Shannon Index (H')",
+    subtitle = "Skin  Microbiome Samples",
+    x = "Health condition",
+    y = "Alpha Diversity (H')"
+  ) +
+  guides(color = guide_none(), shape = guide_none()) +
+  theme_ipsum_rc()
+```
+
+## Beta Diveristy
+
+```{r}
+skinData_AD |>
+  runMDS(FUN = vegdist, method = "bray", exprs_values = "logcounts", name = "BrayCurtis") |>
+  plotReducedDim("BrayCurtis", colour_by = "disease", shape_by = "disease", text_by = "disease") +
+  labs(
+    title = "Beta Diversity by Health Condition, Bray-Curtis PCoA",
+    subtitle = "Skin Microbiome Samples",
+    x = "PCo 1",
+    y = "PCo 2"
+  ) +
+  guides(color = guide_none(), shape = guide_none()) +
+  theme_ipsum_rc()
+```
+
+```{r}
+skinData_PS |>
+  runMDS(FUN = vegdist, method = "bray", exprs_values = "logcounts", name = "BrayCurtis") |>
+  plotReducedDim("BrayCurtis", colour_by = "disease", shape_by = "disease", text_by = "disease") +
+  labs(
+    title = "Beta Diversity by Health Condition, Bray-Curtis PCoA",
+    subtitle = "Skin Microbiome Samples",
+    x = "PCo 1",
+    y = "PCo 2"
+  ) +
+  guides(color = guide_none(), shape = guide_none()) +
+  theme_ipsum_rc()
+```
+
+\## Modeling Bacteria by Health Condition
+
+```{r, echo=FALSE, results='hide', message=FALSE}
+# Converting data to phyloseq class objects
+physeq_AD <- mia::makePhyloseqFromTreeSummarizedExperiment(
+  skinData_AD
+)
+
+ancombcResults_AD <- ancombc2(
+  data = physeq_AD,
+  assay_name = "relative_abundance",
+  fix_formula = "disease",  # Testing by disease status
+)
+
+physeq_PS <- mia::makePhyloseqFromTreeSummarizedExperiment(
+  skinData_PS
+)
+
+ancombcResults_PS <- ancombc2(
+  data = physeq_PS,
+  assay_name = "relative_abundance",
+  fix_formula = "disease",  # Testing by disease status
+)
+```
+
+```{r}
+# The results of the ANCOMBC model are in a strange list structure and have to be coerced into a data.frame before they can be displayed; the bind_cols() function from the dplyr package is used
+ancombcTable_AD <-
+  bind_cols(ancombcResults_AD[["res"]])
+
+# Yet, the column names of the results table are missing and have to be assigned,
+colnames(ancombcTable_AD) <-
+  names(ancombcResults_AD[["res"]])
+
+# The row names of the results table are big long strings of microbial taxonomies that will need some editing if they are to be displayed nicely. the rownames_to_column() function from the tibble package is used below to turn them into a column so they can be edited.
+ancombcTable_AD <-
+  rownames_to_column(ancombcTable_AD)
+
+# Before the row names are split into 7 pieces, the names of columns that each piece will be assigned to are created below
+rankNames <-
+  c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+
+# The row names of the results table are then transformed using tidyr, dplyr, and stringr
+ancombcTable_AD[["rowname"]] <-
+  separate(ancombcTable_AD, taxon, rankNames, sep = "\\|") |>
+  select(all_of(rankNames)) |>
+  mutate(across(.fns = ~ str_remove_all(.x, ".__"))) |>
+  mutate(across(.fns = ~ str_replace_all(.x, "_", " "))) |>
+  mutate(label = Species) |>
+  pull(label)
+
+# Same procedure for psoriasis samples
+ancombcTable_PS <-
+  bind_cols(ancombcResults_PS[["res"]])
+
+colnames(ancombcTable_PS) <-
+  names(ancombcResults_PS[["res"]])
+
+ancombcTable_PS <-
+  rownames_to_column(ancombcTable_PS)
+
+ancombcTable_PS[["rowname"]] <-
+  separate(ancombcTable_PS, taxon, rankNames, sep = "\\|") |>
+  select(all_of(rankNames)) |>
+  mutate(across(.fns = ~ str_remove_all(.x, ".__"))) |>
+  mutate(across(.fns = ~ str_replace_all(.x, "_", " "))) |>
+  mutate(label = Species) |>
+  pull(label)
+```
+
+Once the results table is in good shape, it can be filtered to include only bacterial species that exhibited large (e.g. `abs(Intercept) > 1`) and significant (`-log10(q_val) > 5`) differences in abundances between the two health condition. The table is sorted by effect size and a number of formatting conventions are applied before displaying the results table.
+
+```{r}
+filter(ancombcTable_AD, abs(`lfc_(Intercept)`) > 1) |>
+  filter(-log10(`q_(Intercept)`) > 5) |>
+  select(rowname, `lfc_(Intercept)`, `se_(Intercept)`, `p_(Intercept)`, `q_(Intercept)`) |>
+  arrange(-abs(`lfc_(Intercept)`)) |>
+  column_to_rownames() |>
+  mutate(across(where(is.numeric), ~ round(.x, digits = 3))) |>
+  mutate(`lfc_(Intercept)` = format(`lfc_(Intercept)`, nsmall = 3)) |>
+  mutate(`lfc_(Intercept)` = str_replace(`lfc_(Intercept)`, " ", "&nbsp;")) |>
+  mutate(`p_(Intercept)` = if_else(`p_(Intercept)` == 0, "< 0.001", format(`p_(Intercept)`, nsmall = 3))) |>
+  mutate(`q_(Intercept)` = if_else(`q_(Intercept)` == 0, "< 0.001", format(`q_(Intercept)`, nsmall = 3))) |>
+  kable(col.names = c("β", "SE", "P", "Q"), align = "cccc", escape = FALSE)
+```
+
+```{r}
+ancombcTable_AD |>
+  mutate(rowname = str_replace(rowname, "^([A-Z])([a-z])+ ", "\\1. ")) |>
+  mutate(`q_(Intercept)` = -log10(`q_(Intercept)`)) |>
+  mutate(label = if_else(abs(`lfc_(Intercept)`) > 1, rowname, NA_character_)) |>
+  mutate(label = if_else(`q_(Intercept)` > 5, label, NA_character_)) |>
+  mutate(color = if_else(`lfc_(Intercept)` > 1, "#FF9E4A", "#729ECE")) |>
+  mutate(color = if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_(Intercept)`, `q_(Intercept)`, color = I(color), label = label, shape = I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 5) +
+  geom_vline(linetype = "dotted", xintercept = 1) +
+  geom_vline(linetype = "dotted", xintercept = -1) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(
+    title = "Significance vs. Effect Size, ANCOM-BC",
+    subtitle = "Skin Microbiome Samples",
+    x = expression(beta),
+    y = expression(-~log[10]~Q)
+  ) +
+  guides(color = "none", shape = "none") +
+  theme_ipsum_rc()
+```
+
+```{r}
+filter(ancombcTable_PS, abs(`lfc_(Intercept)`) > 1) |>
+  filter(-log10(`q_(Intercept)`) > 5) |>
+  select(rowname, `lfc_(Intercept)`, `se_(Intercept)`, `p_(Intercept)`, `q_(Intercept)`) |>
+  arrange(-abs(`lfc_(Intercept)`)) |>
+  column_to_rownames() |>
+  mutate(across(where(is.numeric), ~ round(.x, digits = 3))) |>
+  mutate(`lfc_(Intercept)` = format(`lfc_(Intercept)`, nsmall = 3)) |>
+  mutate(`lfc_(Intercept)` = str_replace(`lfc_(Intercept)`, " ", "&nbsp;")) |>
+  mutate(`p_(Intercept)` = if_else(`p_(Intercept)` == 0, "< 0.001", format(`p_(Intercept)`, nsmall = 3))) |>
+  mutate(`q_(Intercept)` = if_else(`q_(Intercept)` == 0, "< 0.001", format(`q_(Intercept)`, nsmall = 3))) |>
+  kable(col.names = c("β", "SE", "P", "Q"), align = "cccc", escape = FALSE)
+```
+
+Let's decrease treshold `abs(Intercept)` to 0.7.
+
+```{r}
+filter(ancombcTable_PS, abs(`lfc_(Intercept)`) > 0.7) |>
+  filter(-log10(`q_(Intercept)`) > 5) |>
+  select(rowname, `lfc_(Intercept)`, `se_(Intercept)`, `p_(Intercept)`, `q_(Intercept)`) |>
+  arrange(-abs(`lfc_(Intercept)`)) |>
+  column_to_rownames() |>
+  mutate(across(where(is.numeric), ~ round(.x, digits = 3))) |>
+  mutate(`lfc_(Intercept)` = format(`lfc_(Intercept)`, nsmall = 3)) |>
+  mutate(`lfc_(Intercept)` = str_replace(`lfc_(Intercept)`, " ", "&nbsp;")) |>
+  mutate(`p_(Intercept)` = if_else(`p_(Intercept)` == 0, "< 0.001", format(`p_(Intercept)`, nsmall = 3))) |>
+  mutate(`q_(Intercept)` = if_else(`q_(Intercept)` == 0, "< 0.001", format(`q_(Intercept)`, nsmall = 3))) |>
+  kable(col.names = c("β", "SE", "P", "Q"), align = "cccc", escape = FALSE)
+```
+
+```{r}
+ancombcTable_PS |>
+  mutate(rowname = str_replace(rowname, "^([A-Z])([a-z])+ ", "\\1. ")) |>
+  mutate(`q_(Intercept)` = -log10(`q_(Intercept)`)) |>
+  mutate(label = if_else(abs(`lfc_(Intercept)`) > 0.7, rowname, NA_character_)) |>
+  mutate(label = if_else(`q_(Intercept)` > 5, label, NA_character_)) |>
+  mutate(color = if_else(`lfc_(Intercept)` > 0.7, "#FF9E4A", "#729ECE")) |>
+  mutate(color = if_else(is.na(label), "#000000", color)) |>
+  ggplot(mapping = aes(`lfc_(Intercept)`, `q_(Intercept)`, color = I(color), label = label, shape = I(1))) +
+  geom_point() +
+  geom_hline(linetype = "dotted", yintercept = 5) +
+  geom_vline(linetype = "dotted", xintercept = 0.7) +
+  geom_vline(linetype = "dotted", xintercept = -0.7) +
+  geom_label_repel(min.segment.length = 0, force = 10, max.overlaps = 20, na.rm = TRUE) +
+  labs(
+    title = "Significance vs. Effect Size, ANCOM-BC",
+    subtitle = "Skin Microbiome Samples",
+    x = expression(beta),
+    y = expression(-~log[10]~Q)
+  ) +
+  guides(color = "none", shape = "none") +
+  theme_ipsum_rc()
+```
+
+```{r}
+# Save all samples to the taxa abundance matrix and metadata
+write.table(skinMetadata_all, file = "CuratedM_META_Skin_all.tsv", sep = "\t", row.names = FALSE, quote = FALSE)
+
+relative_abundance <- returnSamples(
+  sampleMetadata = skinMetadata_all,
+  dataType = "relative_abundance"
+)
+
+taxa_matrix <- assay(relative_abundance)
+
+write.table(taxa_matrix, file = "CuratedM_Skin_all.tsv", sep = "\t", row.names = TRUE, quote = FALSE)
+```
